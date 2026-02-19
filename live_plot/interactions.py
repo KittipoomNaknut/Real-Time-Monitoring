@@ -43,10 +43,24 @@ class MouseTracker:
         self._inside = False
         self._attached_window: Optional[str] = None
 
-    def attach(self, window_name: str) -> None:
-        """Register mouse callback for a named window."""
+    def attach(self, window_name: str) -> bool:
+        """
+        Register mouse callback for a named window.
+
+        Returns True if successful, False if window not ready.
+
+        On Linux with Qt backend + Wayland, the window handle may not
+        be ready immediately after cv2.namedWindow(). The caller should
+        ensure cv2.waitKey(1) is called first to let Qt process events.
+        """
         self._attached_window = window_name
-        cv2.setMouseCallback(window_name, self._callback)
+        try:
+            cv2.setMouseCallback(window_name, self._callback)
+            return True
+        except cv2.error:
+            # Window not ready yet (Qt/Wayland race condition)
+            # Will retry on next _ensure_window call
+            return False
 
     def _callback(self, event: int, x: int, y: int,
                   flags: int, param) -> None:

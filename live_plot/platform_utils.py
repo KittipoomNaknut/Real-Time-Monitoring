@@ -218,17 +218,31 @@ def apply_platform_fixes() -> dict:
             'os': 'Windows',
             'timer_boosted': True,
             'hidpi_set': True,
+            'qt_backend_fixed': False,
         }
     """
+    import os
+
     result = {
         'os': PlatformInfo.OS,
         'timer_boosted': False,
         'hidpi_set': False,
+        'qt_backend_fixed': False,
     }
 
     if PlatformInfo.IS_WINDOWS:
         result['timer_boosted'] = _TimerResolution.boost()
         result['hidpi_set'] = enable_hidpi_awareness()
+
+    if PlatformInfo.IS_LINUX:
+        # OpenCV Qt backend may fail to find the Wayland plugin.
+        # If XDG_SESSION_TYPE is wayland and QT_QPA_PLATFORM is not set,
+        # force xcb (X11 compatibility layer via XWayland) to avoid:
+        #   "Could not find the Qt platform plugin 'wayland'"
+        session = os.environ.get('XDG_SESSION_TYPE', '').lower()
+        if session == 'wayland' and 'QT_QPA_PLATFORM' not in os.environ:
+            os.environ['QT_QPA_PLATFORM'] = 'xcb'
+            result['qt_backend_fixed'] = True
 
     return result
 

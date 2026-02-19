@@ -22,6 +22,19 @@ Keyboard Shortcuts:
 
 __version__ = "3.0.0"
 
+# ── Early platform fix ──────────────────────────────────────
+# Must run BEFORE importing cv2, which initializes Qt backend.
+# On Linux Wayland sessions, OpenCV's bundled Qt may not include
+# the Wayland plugin, causing noisy warnings. Force xcb (XWayland)
+# to suppress "Could not find Qt platform plugin 'wayland'" errors.
+import os as _os
+import platform as _platform
+if (_platform.system() == 'Linux'
+        and _os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+        and 'QT_QPA_PLATFORM' not in _os.environ):
+    _os.environ['QT_QPA_PLATFORM'] = 'xcb'
+del _os, _platform
+
 # Core class
 from .core import LivePlot
 

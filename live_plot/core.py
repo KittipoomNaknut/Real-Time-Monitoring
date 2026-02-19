@@ -88,6 +88,7 @@ class LivePlot:
         self._status_text = ""
         self._status_clear_time = 0.0
         self._window_created = False
+        self._mouse_attached = False
         self._theme_cycle = list(THEMES.keys())
         self._theme_index = self._theme_cycle.index(self._config.theme) \
             if self._config.theme in self._theme_cycle else 0
@@ -338,9 +339,15 @@ class LivePlot:
     def _ensure_window(self) -> None:
         if not self._window_created:
             cv2.namedWindow(self._window_name, cv2.WINDOW_AUTOSIZE)
-            if self._config.enable_mouse_tooltip:
-                self._mouse.attach(self._window_name)
+            # Qt backend (especially on Wayland/Linux) needs at least one
+            # event loop iteration before the window handle becomes valid.
+            # Without this, setMouseCallback crashes with "NULL window handler".
+            cv2.waitKey(1)
+            self._mouse_attached = False
             self._window_created = True
+
+        if not self._mouse_attached and self._config.enable_mouse_tooltip:
+            self._mouse_attached = self._mouse.attach(self._window_name)
 
     def _do_render(self) -> np.ndarray:
         """Internal render call. Must be called under lock."""

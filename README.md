@@ -1,7 +1,7 @@
 # 📊 LivePlot v3.0 — คู่มือฉบับสมบูรณ์
 
 > **Cross-Platform High-Performance Real-Time OpenCV Plotter**
-> เวอร์ชัน 3.0.0 | Python 3.10+ | Windows & Linux
+> เวอร์ชัน 3.0.1 | Python 3.10+ | Windows & Linux (รวม Wayland)
 > Dependencies: `numpy >= 1.21` · `opencv-python >= 4.5`
 
 ---
@@ -53,16 +53,16 @@ pip install numpy opencv-python
 
 ```
 live_plot/
-├── __init__.py          # Public API exports
+├── __init__.py          # Public API exports + Wayland early fix
 ├── __main__.py          # python -m live_plot
-├── platform_utils.py    # OS detection, timer boost, HiDPI, key normalization
+├── platform_utils.py    # OS detection, timer boost, HiDPI, key normalization, Wayland fix
 ├── colors.py            # Theme system (dark / light / midnight / custom)
 ├── config.py            # PlotConfig, SeriesConfig, AutoScaleMode
 ├── series.py            # Circular buffer data container
 ├── renderer.py          # Background cache + drawing pipeline
 ├── frame_timer.py       # Cross-platform frame rate controller
-├── interactions.py      # Mouse, keyboard shortcuts, screenshot, video
-├── core.py              # Main LivePlot class
+├── interactions.py      # Mouse (with retry), keyboard shortcuts, screenshot, video
+├── core.py              # Main LivePlot class (window init with waitKey fix)
 └── demo.py              # 5 demo scripts
 ```
 
@@ -669,6 +669,30 @@ plot.update("temp", 25.0)       # ✓ ใช้ได้
 
 ยกเว้นแบบค่าเดียว `plot.update(25.0)` → auto-create
 
+### Q: "Could not find the Qt platform plugin 'wayland'" (Linux)
+
+เกิดบน Linux ที่ใช้ Wayland session (เช่น Ubuntu 22.04+, Fedora 38+)
+OpenCV ที่ build มาด้วย Qt backend อาจไม่มี Wayland plugin รวมมาด้วย
+
+**v3 แก้ให้อัตโนมัติแล้ว** — `__init__.py` ตรวจว่า `XDG_SESSION_TYPE=wayland` แล้วตั้ง `QT_QPA_PLATFORM=xcb` **ก่อน** import `cv2` ทำให้ OpenCV ใช้ X11 ผ่าน XWayland แทน
+
+ถ้ายังเจอ warning ให้ตั้ง environment variable เองก่อนรัน:
+
+```bash
+export QT_QPA_PLATFORM=xcb
+python -m live_plot.demo
+```
+
+### Q: "NULL window handler" crash ตอนเริ่ม (Linux Qt)
+
+เกิดเมื่อ `cv2.setMouseCallback()` ถูกเรียกก่อน window handle พร้อม
+พบบ่อยบน Qt backend + Wayland เพราะ `cv2.namedWindow()` return ก่อนที่ Qt จะ init window จริง
+
+**v3 แก้ให้แล้ว 3 ชั้น:**
+1. `__init__.py` → force `QT_QPA_PLATFORM=xcb` ก่อน import cv2
+2. `core.py` → เพิ่ม `cv2.waitKey(1)` หลัง `namedWindow()` ให้ Qt process event loop 1 รอบ
+3. `interactions.py` → `MouseTracker.attach()` ครอบ `try/except` + retry ทุก frame จนสำเร็จ
+
 ### Q: วิดีโอบันทึกไม่ได้ (Linux)
 
 ติดตั้ง ffmpeg:
@@ -709,6 +733,9 @@ threading.Thread(target=lambda: plot.step("data", value)).start()     # imshow �
 ### Dependency Graph
 
 ```
+__init__.py (early Wayland fix — BEFORE cv2 import)
+  │
+  ▼
 core.py (LivePlot)
   ├── config.py        (PlotConfig, SeriesConfig, AutoScaleMode)
   ├── colors.py        (Theme, get_theme, register_theme)
@@ -721,7 +748,7 @@ core.py (LivePlot)
   │     └── platform_utils.py
   ├── interactions.py   (MouseTracker, VideoRecorder, KeyAction)
   │     └── platform_utils.py
-  └── platform_utils.py (PlatformInfo, timer boost, HiDPI, key normalize)
+  └── platform_utils.py (PlatformInfo, timer boost, HiDPI, key normalize, Wayland fix)
 ```
 
 ### Data Flow Diagram
@@ -759,6 +786,12 @@ user code
     │
     │ (step only ↓)
     ▼
+  _ensure_window()                    ← ทำครั้งเดียว
+  ├── cv2.namedWindow()
+  ├── cv2.waitKey(1)                  ← ให้ Qt init window handle
+  └── mouse.attach() → retry if fail  ← Wayland safety
+    │
+    ▼
   cv2.imshow(window_name, canvas)
     │
     ▼
@@ -786,7 +819,7 @@ user code
 
 ## 14. platform_utils.py
 
-**หน้าที่:** แก้ปัญหาความแตกต่างระหว่าง Windows กับ Linux ทั้ง 3 เรื่อง
+**หน้าที่:** แก้ปัญหาความแตกต่างระหว่าง Windows กับ Linux ทั้ง 4 เรื่อง
 
 ### 14.1 PlatformInfo — ตรวจ OS
 
@@ -852,12 +885,52 @@ def normalize_key(raw_key: int) -> int:
 
 `0x100071 & 0xFF = 0x71 = 113 = ord('q')` → ทำงานเหมือนกันทั้งสอง OS
 
-### 14.5 apply_platform_fixes — เรียกครั้งเดียว
+### 14.5 Qt/Wayland Fix — แก้ปัญหา Linux Wayland Session
+
+**ปัญหา:** OpenCV ที่ build ด้วย Qt backend อาจไม่มี Wayland plugin → เกิด warning:
+```
+qt.qpa.plugin: Could not find the Qt platform plugin "wayland"
+```
+แย่กว่านั้น — บาง setup Qt จะ init window ช้าเพราะ Wayland fallback ทำให้ `namedWindow()` return ก่อน window handle พร้อม → `setMouseCallback()` crash: `NULL window handler`
+
+**วิธีแก้ (2 ชั้น):**
+
+**ชั้นที่ 1 — Early environment fix ใน `__init__.py`:**
+
+```python
+# __init__.py (บรรทัดบนสุด ก่อน import cv2)
+import os, platform
+if (platform.system() == 'Linux'
+        and os.environ.get('XDG_SESSION_TYPE', '').lower() == 'wayland'
+        and 'QT_QPA_PLATFORM' not in os.environ):
+    os.environ['QT_QPA_PLATFORM'] = 'xcb'
+```
+
+ต้องตั้ง **ก่อน** `import cv2` เพราะ cv2 อ่าน `QT_QPA_PLATFORM` ตอน import แล้ว init Qt backend ทันที ถ้าตั้งทีหลังจะไม่มีผล
+
+`xcb` = X11 protocol ซึ่งทำงานผ่าน XWayland (compatibility layer ที่มีเกือบทุก Wayland compositor)
+
+**ชั้นที่ 2 — Runtime check ใน `apply_platform_fixes()`:**
+
+```python
+if PlatformInfo.IS_LINUX:
+    session = os.environ.get('XDG_SESSION_TYPE', '').lower()
+    if session == 'wayland' and 'QT_QPA_PLATFORM' not in os.environ:
+        os.environ['QT_QPA_PLATFORM'] = 'xcb'
+```
+
+เป็น safety net สำหรับกรณีที่ user import module ย่อยตรงโดยไม่ผ่าน `__init__.py`
+
+### 14.6 apply_platform_fixes — เรียกครั้งเดียว
 
 `LivePlot.__init__` เรียก `apply_platform_fixes()` ซึ่งรันทุก fix ข้างต้นพร้อมกัน แล้วคืน dict บอกผลลัพธ์:
 
 ```python
-{'os': 'Windows', 'timer_boosted': True, 'hidpi_set': True}
+# Windows:
+{'os': 'Windows', 'timer_boosted': True, 'hidpi_set': True, 'qt_backend_fixed': False}
+
+# Linux Wayland:
+{'os': 'Linux', 'timer_boosted': False, 'hidpi_set': False, 'qt_backend_fixed': True}
 ```
 
 ---
@@ -1236,8 +1309,14 @@ def _draw_tooltip(self, ..., mouse_pos, px, py, pw, ph):
 
 ```python
 class MouseTracker:
-    def attach(self, window_name):
-        cv2.setMouseCallback(window_name, self._callback)
+    def attach(self, window_name) -> bool:
+        self._attached_window = window_name
+        try:
+            cv2.setMouseCallback(window_name, self._callback)
+            return True
+        except cv2.error:
+            # Window not ready (Qt/Wayland race condition)
+            return False     # caller จะ retry frame ถัดไป
 
     def _callback(self, event, x, y, flags, param):
         if event == cv2.EVENT_MOUSEMOVE:
@@ -1252,6 +1331,8 @@ class MouseTracker:
 ```
 
 ใช้ OpenCV mouse callback ซึ่งทำงานบน **HighGUI thread เดียวกับ `cv2.imshow()`** จึงไม่มี cross-thread issue ถ้าอ่าน `position` จาก thread เดียวกัน
+
+**ทำไมต้อง `try/except`?** — บน Linux Qt backend (โดยเฉพาะ Wayland session) `cv2.namedWindow()` อาจ return ก่อนที่ window handle จะพร้อมจริง ถ้าเรียก `setMouseCallback()` ตอนนั้นจะได้ `cv2.error: NULL window handler` แทนที่จะ crash ทั้งโปรแกรม เราดัก error แล้ว return `False` ให้ `core.py` retry ใน frame ถัดไป
 
 ### 20.2 VideoRecorder
 
@@ -1309,7 +1390,7 @@ def __init__(self, config, *, window_name):
     # 1. เก็บ config
     self._config = config or PlotConfig()
 
-    # 2. แก้ปัญหา OS (timer boost + HiDPI) ← ทำครั้งเดียว
+    # 2. แก้ปัญหา OS (timer boost + HiDPI + Wayland) ← ทำครั้งเดียว
     self._platform_info = apply_platform_fixes()
 
     # 3. สร้าง sub-systems
@@ -1320,6 +1401,8 @@ def __init__(self, config, *, window_name):
 
     # 4. Internal state
     self._paused = False
+    self._window_created = False
+    self._mouse_attached = False     # retry flag สำหรับ Qt/Wayland
     self._lock = threading.Lock()                # thread safety
 ```
 
@@ -1339,7 +1422,7 @@ def update(self, name_or_value, value=None, color=None):
 
 ใช้ pattern **"optional second argument"** เพื่อ support 2 call signatures โดยไม่ต้อง overload (Python ไม่มี function overloading)
 
-### 21.3 step() — ทำทุกอย่างใน 1 เมธอด
+### 21.3 step() → _display_and_handle() → _ensure_window()
 
 ```python
 def step(self, name_or_value, value=None, color=None) -> bool:
@@ -1355,6 +1438,42 @@ def _display_and_handle(self, img):
     if key < 0: return False
     return self._handle_key(key)             # process shortcuts
 ```
+
+**`_ensure_window()` — Lazy Init + Wayland Retry:**
+
+```python
+def _ensure_window(self):
+    if not self._window_created:
+        cv2.namedWindow(self._window_name, WINDOW_AUTOSIZE)
+        cv2.waitKey(1)                    # ← ให้ Qt process event loop 1 รอบ
+        self._mouse_attached = False
+        self._window_created = True
+
+    # Retry mouse attach ทุก frame จนสำเร็จ
+    if not self._mouse_attached and self._config.enable_mouse_tooltip:
+        self._mouse_attached = self._mouse.attach(self._window_name)
+```
+
+**ทำไมต้อง `waitKey(1)` ตรงนี้?**
+
+บน Linux Qt backend (โดยเฉพาะ Wayland) ลำดับเหตุการณ์คือ:
+
+```
+cv2.namedWindow()
+    → Qt สร้าง QWindow object           ← return ทันที
+    → Qt ยังไม่สร้าง native window handle  ← ต้องรอ event loop
+
+cv2.setMouseCallback()
+    → ถ้า handle = NULL → crash!          ← เกิดตรงนี้
+
+cv2.waitKey(1)
+    → บังคับ Qt process pending events
+    → native window handle ถูกสร้าง         ← แก้ปัญหา
+```
+
+**ทำไมต้อง retry pattern?**
+
+แม้จะมี `waitKey(1)` แล้ว บาง environment (Docker, WSL, remote X11) อาจต้องใช้ >1 event loop iteration ดังนั้น `_mouse_attached` flag จะ retry `attach()` ทุก frame จนสำเร็จ ถ้า attach fail → tooltip แค่ไม่ทำงานชั่วคราว โปรแกรมไม่ crash
 
 ### 21.4 _handle_key() — จัดการ Keyboard Shortcuts
 
@@ -1418,4 +1537,4 @@ def close(self):
 
 ---
 
-> **LivePlot v3.0** — Cross-platform. Production-grade. Built for real-time.
+> **LivePlot v3.0.1** — Cross-platform. Production-grade. Wayland-safe. Built for real-time.
