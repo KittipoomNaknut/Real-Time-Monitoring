@@ -1,4 +1,4 @@
-# 📊 LivePlot v3.0 — คู่มือฉบับสมบูรณ์
+# 📊 LivePlot v3.0
 
 > **Cross-Platform High-Performance Real-Time OpenCV Plotter**
 > เวอร์ชัน 3.0.1 | Python 3.10+ | Windows & Linux (รวม Wayland)
